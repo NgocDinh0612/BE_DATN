@@ -468,55 +468,72 @@ router.get("/", authenticate, async (req, res) => {
  * Tạo lệnh ON/OFF
  * ==============================
  */
-router.post("/:id/toggle", authenticate, async (req, res) => {
-  try {
-    const { action } = req.body;
-    const device = await LightDevice.findOne({ _id: req.params.id, user: req.user.userId, isDeleted: { $ne: true } });
-    if (!device) return res.status(404).json({ ok: false, message: "Not found" });
-
-    const cmd = await Command.create({ deviceId: device.deviceId, command: action, params: {}, status: "pending" });
-    res.json({ ok: true, command: cmd });
-    console.log(`[TOGGLE] Created command for device ${device.deviceId}: ${JSON.stringify(cmd)}`);
-  } catch (err) {
-    console.error("[TOGGLE] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi tạo lệnh" });
-  }
-});
-
 /**
  * ==============================
- * Tạo lệnh chỉnh độ sáng
+ * Gửi lệnh chung (toggle + brightness)
  * ==============================
  */
-router.post("/:id/brightness", authenticate, async (req, res) => {
+router.post("/:id/command", authenticate, async (req, res) => {
   try {
-    const { brightness } = req.body;
-    if (typeof brightness !== "number" || brightness < 0 || brightness > 100)
-      return res.status(400).json({ ok: false, message: "Brightness phải là số từ 0-100" });
+    const { command, brightness } = req.body;
 
-    const device = await LightDevice.findOne({ _id: req.params.id, user: req.user.userId, isDeleted: { $ne: true } });
-    if (!device) return res.status(404).json({ ok: false, message: "Device not found" });
-
-    // Tạo lệnh brightness
-    const cmd = await Command.create({
-      deviceId: device.deviceId,
-      command: "BRIGHTNESS",
-      params: { value: brightness },
-      status: "pending",
+    // Kiểm tra device có thuộc về user không
+    const device = await LightDevice.findOne({
+      _id: req.params.id,
+      user: req.user.userId,
+      isDeleted: { $ne: true },
     });
 
-    // Update luôn trạng thái LightStatus để web phản ánh ngay
-    await LightStatus.findOneAndUpdate(
-      { deviceId: device.deviceId },
-      { $set: { brightness } },
-      { upsert: true }
-    );
+    if (!device) {
+      return res.status(404).json({ ok: false, message: "Không tìm thấy thiết bị" });
+    }
 
-    res.json({ ok: true, command: cmd });
-    console.log(`[BRIGHTNESS] Created command for ${device.deviceId}: ${brightness}`);
+    // Xử lý lệnh toggle
+    if (command === "toggle") {
+      // Tìm trạng thái hiện tại
+      const currentStatus = await LightStatus.findOne({ deviceId: device.deviceId });
+      const newRelayState = !(currentStatus?.relay || false);
+
+      // Tạo lệnh toggle
+      await Command.create({
+        deviceId: device.deviceId,
+        command: newRelayState ? "ON" : "OFF",
+        params: {},
+        status: "pending",
+      });
+
+      // Cập nhật trạng thái ngay
+      await LightStatus.findOneAndUpdate(
+        { deviceId: device.deviceId },
+        { $set: { relay: newRelayState } },
+        { upsert: true }
+      );
+    }
+
+    // Xử lý lệnh brightness
+    if (typeof brightness === "number") {
+      if (brightness < 0 || brightness > 100)
+        return res.status(400).json({ ok: false, message: "Brightness phải từ 0 đến 100" });
+
+      await Command.create({
+        deviceId: device.deviceId,
+        command: "BRIGHTNESS",
+        params: { value: brightness },
+        status: "pending",
+      });
+
+      await LightStatus.findOneAndUpdate(
+        { deviceId: device.deviceId },
+        { $set: { brightness } },
+        { upsert: true }
+      );
+    }
+
+    res.json({ ok: true, message: "Lệnh đã được gửi thành công" });
+    console.log(`[COMMAND] Sent command for ${device.deviceId}: ${JSON.stringify(req.body)}`);
   } catch (err) {
-    console.error("[BRIGHTNESS] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi tạo lệnh độ sáng" });
+    console.error("[COMMAND] error:", err.message);
+    res.status(500).json({ ok: false, message: "Lỗi khi xử lý lệnh chung" });
   }
 });
 
