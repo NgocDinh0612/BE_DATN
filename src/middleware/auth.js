@@ -23,10 +23,16 @@ async function authenticate(req, res, next) {
       await user.save();
     } else {
       const diffMinutes = (now - user.lastActivity.getTime()) / 1000 / 60;
-      if (diffMinutes > 15) {
+    
+      //  Nếu token mới (vừa được cấp lại sau đăng nhập) => không kiểm tra lastActivity
+      if (diffMinutes > 15 && decoded.iat * 1000 < user.lastActivity.getTime()) {
+        // iat là thời điểm token được tạo
+        // Nếu token mới hơn lastActivity => hợp lệ
+      } else if (diffMinutes > 15) {
         return res.status(401).json({ message: "Phiên làm việc đã hết hạn" });
       }
-      // Reset lastActivity mỗi request hợp lệ
+    
+      // Cập nhật lại lastActivity mỗi request hợp lệ
       user.lastActivity = new Date();
       await user.save();
     }
