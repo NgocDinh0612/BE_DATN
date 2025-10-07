@@ -1,3 +1,4 @@
+// src/routes/device.js
 const express = require("express");
 const router = express.Router();
 const Command = require("../models/Command");
@@ -6,24 +7,31 @@ const LightDevice = require("../models/LightDevice");
 const { authenticate } = require("../middleware/auth");
 
 /**
+ * Helper: normalize MAC/deviceId
+ */
+function normalizeMac(mac) {
+  if (!mac || typeof mac !== "string") return null;
+  return mac.trim().toUpperCase();
+}
+
+/**
  * ==============================
- * Đăng ký thiết bị (ESP gọi)
- * ==============================
+ * 1) Đăng ký thiết bị (ESP gọi)
+ *    POST /api/devices/register
+ *    Body: { mac: "AA:BB:CC:..." }
+ *    Trả về: { ok: true, deviceId }
+ *    -> Không gửi location/gps gì về cho ESP.
  */
 router.post("/register", async (req, res) => {
   try {
-    const { mac } = req.body;
-
-    // Kiểm tra định dạng MAC
-    if (!mac || !/^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/.test(mac)) {
+    const rawMac = req.body.mac;
+    const deviceId = normalizeMac(rawMac);
+    if (!deviceId || !/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(deviceId)) {
       return res.status(400).json({ ok: false, message: "Invalid MAC address" });
     }
 
-    const deviceId = mac.toUpperCase();
     let device = await LightDevice.findOne({ deviceId });
-
     if (!device) {
-      // Tạo thiết bị mới
       device = await LightDevice.create({
         deviceId,
         name: `Device-${deviceId}`,
@@ -33,100 +41,90 @@ router.post("/register", async (req, res) => {
         isDeleted: false,
       });
 
-      // Tạo trạng thái ban đầu
       await LightStatus.create({
         deviceId,
         relay: false,
         brightness: 50,
       });
 
-      console.log(`[REGISTER] New device created: ${device.deviceId}`);
+      console.log(`[REGISTER] New device created: ${deviceId}`);
     } else {
-      console.log(`[REGISTER] Device already exists: ${device.deviceId}`);
+      console.log(`[REGISTER] Device exists: ${deviceId}`);
     }
 
-    const response = { ok: true, deviceId, isAssigned: !!device.user };
-    res.status(200).json(response);
-    console.log(`[REGISTER] Response sent: ${JSON.stringify(response)}`);
+    return res.json({ ok: true, deviceId, isAssigned: !!device.user });
   } catch (err) {
-    console.error("[REGISTER] error:", err.message);
-    res.status(500).json({ ok: false, message: "Server error" });
+    console.error("[REGISTER] error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
 /**
  * ==============================
- * Lấy danh sách thiết bị pending
- * ==============================
+ * 2) Danh sách thiết bị pending để web chọn gán
+ *    GET /api/devices/pending
+ *    AUTH required
  */
 router.get("/pending", authenticate, async (req, res) => {
   try {
-    const devices = await LightDevice.find({ status: "pending" });
-    res.json({ ok: true, devices });
+    // Thiết bị chưa có user (chưa gán)
+    const devices = await LightDevice.find({ user: null, isDeleted: { $ne: true } }).select(
+      "_id deviceId name location gps"
+    );
+    return res.json({ ok: true, devices });
   } catch (err) {
-    console.error("[PENDING] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi lấy danh sách thiết bị" });
+    console.error("[PENDING] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi lấy danh sách thiết bị" });
   }
 });
 
 /**
  * ==============================
- * Duyệt thiết bị
- * ==============================
+ * 3) Approve device (tuỳ bạn có cần GUI admin)
+ *    POST /api/devices/approve/:mac
+ *    AUTH required
  */
 router.post("/approve/:mac", authenticate, async (req, res) => {
   try {
-    const { mac } = req.params;
+    const mac = normalizeMac(req.params.mac);
+    if (!mac) return res.status(400).json({ ok: false, message: "Invalid MAC" });
+
     const device = await LightDevice.findOneAndUpdate(
-      { deviceId: mac.toUpperCase() },
-      { status: "active" },
+      { deviceId: mac },
+      { $set: { status: "active" } },
       { new: true }
     );
+    if (!device) return res.status(404).json({ ok: false, message: "Device not found" });
 
-    if (!device) {
-      return res.status(404).json({ error: "Device not found" });
-    }
-
-    res.json({ ok: true, message: `Approved device ${mac}`, device });
-  } catch (error) {
-    console.error("[APPROVE DEVICE] error:", error);
-    res.status(500).json({ error: "Server error" });
+    return res.json({ ok: true, device });
+  } catch (err) {
+    console.error("[APPROVE] error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
 /**
  * ==============================
- * User gán thiết bị vào tài khoản
- * ==============================
+ * 4) Gán thiết bị vào user (web)
+ *    POST /api/devices
+ *    Body: { name, location, mac, lat?, lon? }
+ *    AUTH required
  */
-// routes/device.js (chỉ phần POST "/" — assign device)
 router.post("/", authenticate, async (req, res) => {
   try {
     const { name, location, mac, lat, lon } = req.body;
+    if (!name || !mac) return res.status(400).json({ ok: false, message: "Name and MAC required" });
 
-    if (!name || !mac) {
-      return res.status(400).json({ ok: false, message: "Name and MAC required" });
-    }
-
-    // Chuẩn hoá MAC
-    const deviceId = mac.toUpperCase();
-
-    // Tìm device đã được ESP đăng ký trước (pending)
+    const deviceId = normalizeMac(mac);
     const device = await LightDevice.findOne({ deviceId, isDeleted: { $ne: true } });
-    if (!device) {
-      return res.status(404).json({ ok: false, message: "Device not found. Please ensure the device has registered (ESP -> /devices/register) first." });
-    }
+    if (!device) return res.status(404).json({ ok: false, message: "Device not found. Make sure ESP called /register first." });
+    if (device.user) return res.status(400).json({ ok: false, message: "Device already assigned" });
 
-    if (device.user) {
-      return res.status(400).json({ ok: false, message: "Device already assigned" });
-    }
-
-    // Gán các thông tin do web gửi
     device.name = name;
     device.location = location || device.location || "";
     device.user = req.user.userId;
 
-    // Nếu web gửi lat/lon hợp lệ thì lưu vào gps
+    // Lưu gps nếu được gửi (web nhập tay)
     if (lat !== undefined && lat !== null && lat !== "") {
       const latNum = parseFloat(lat);
       if (Number.isNaN(latNum) || latNum < -90 || latNum > 90) {
@@ -145,21 +143,20 @@ router.post("/", authenticate, async (req, res) => {
     }
 
     await device.save();
-
-    // trả về device đã cập nhật (frontend dùng để show trên UI ngay)
-    res.json({ ok: true, device });
     console.log(`[ADD DEVICE] Assigned device ${device.deviceId} to user ${req.user.userId} (gps: ${JSON.stringify(device.gps)})`);
+    return res.json({ ok: true, device });
   } catch (err) {
-    console.error("[ADD DEVICE] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi thêm thiết bị", error: err.message });
+    console.error("[ADD DEVICE] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi thêm thiết bị", error: err.message });
   }
 });
 
-
 /**
  * ==============================
- * Lấy danh sách thiết bị của user
- * ==============================
+ * 5) Lấy danh sách thiết bị của user (frontend)
+ *    GET /api/devices
+ *    AUTH required
+ *    -> TRẢ VỀ CÁC TRƯỜNG _id, deviceId, name, location, gps, relay, brightness
  */
 router.get("/", authenticate, async (req, res) => {
   try {
@@ -173,135 +170,136 @@ router.get("/", authenticate, async (req, res) => {
         deviceId: d.deviceId,
         name: d.name,
         location: d.location || "",
-        relay: st.relay,
+        gps: d.gps || { lat: null, lon: null },
+        relay: !!st.relay,
         brightness: st.brightness ?? 50,
       };
     });
 
     const response = { ok: true, devices: devicesWithStatus };
-    res.json(response);
     console.log(`[GET DEVICES] Sent response: ${JSON.stringify(response)}`);
+    return res.json(response);
   } catch (err) {
-    console.error("[GET DEVICES] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi lấy danh sách thiết bị" });
+    console.error("[GET DEVICES] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi lấy danh sách thiết bị" });
   }
 });
 
 /**
  * ==============================
- * Gửi lệnh chung (toggle + brightness)
- * ==============================
+ * 6) Gửi lệnh chung từ web (toggle + brightness)
+ *    POST /api/devices/:id/command
+ *    Body có thể là { command: "toggle" } hoặc { brightness: 80 } hoặc cả hai
+ *    AUTH required
  */
 router.post("/:id/command", authenticate, async (req, res) => {
   try {
+    // frontend truyền _id (document id) của LightDevice
+    const deviceDoc = await LightDevice.findOne({ _id: req.params.id, user: req.user.userId, isDeleted: { $ne: true } });
+    if (!deviceDoc) return res.status(404).json({ ok: false, message: "Không tìm thấy thiết bị" });
+
     const { command, brightness } = req.body;
 
-    const device = await LightDevice.findOne({
-      _id: req.params.id,
-      user: req.user.userId,
-      isDeleted: { $ne: true },
-    });
-
-    if (!device) {
-      return res.status(404).json({ ok: false, message: "Không tìm thấy thiết bị" });
-    }
-
-    // Toggle
+    // toggle logic (nếu gửi command === "toggle")
     if (command === "toggle") {
-      const currentStatus = await LightStatus.findOne({ deviceId: device.deviceId });
+      const currentStatus = await LightStatus.findOne({ deviceId: deviceDoc.deviceId });
       const newRelayState = !(currentStatus?.relay || false);
 
       await Command.create({
-        deviceId: device.deviceId,
+        deviceId: deviceDoc.deviceId,
         command: newRelayState ? "ON" : "OFF",
         params: {},
         status: "pending",
       });
 
-      await LightStatus.findOneAndUpdate(
-        { deviceId: device.deviceId },
-        { $set: { relay: newRelayState } },
-        { upsert: true }
-      );
+      await LightStatus.findOneAndUpdate({ deviceId: deviceDoc.deviceId }, { $set: { relay: newRelayState } }, { upsert: true });
     }
 
-    // Brightness
+    // brightness logic (nếu có)
     if (typeof brightness === "number") {
-      if (brightness < 0 || brightness > 100)
-        return res.status(400).json({ ok: false, message: "Brightness phải từ 0 đến 100" });
+      if (brightness < 0 || brightness > 100) return res.status(400).json({ ok: false, message: "Brightness phải từ 0 đến 100" });
 
       await Command.create({
-        deviceId: device.deviceId,
+        deviceId: deviceDoc.deviceId,
         command: "BRIGHTNESS",
         params: { value: brightness },
         status: "pending",
       });
 
-      await LightStatus.findOneAndUpdate(
-        { deviceId: device.deviceId },
-        { $set: { brightness } },
-        { upsert: true }
-      );
+      await LightStatus.findOneAndUpdate({ deviceId: deviceDoc.deviceId }, { $set: { brightness } }, { upsert: true });
     }
 
-    res.json({ ok: true, message: "Lệnh đã được gửi thành công" });
-    console.log(`[COMMAND] Sent command for ${device.deviceId}: ${JSON.stringify(req.body)}`);
+    console.log(`[COMMAND] Sent command for ${deviceDoc.deviceId}: ${JSON.stringify(req.body)}`);
+    return res.json({ ok: true, message: "Lệnh đã được gửi thành công" });
   } catch (err) {
-    console.error("[COMMAND] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi xử lý lệnh chung" });
+    console.error("[COMMAND] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi xử lý lệnh chung" });
   }
 });
 
 /**
  * ==============================
- * ESP lấy lệnh tiếp theo
- * ==============================
+ * 7) ESP lấy lệnh tiếp theo (ESP gọi)
+ *    GET /api/devices/:deviceId/next-command
+ *    -> Trả command (kèm _id của command để ESP trả lại commandId trong /report)
+ *    -> CHÚ Ý: Không gửi location/gps trong response này.
  */
 router.get("/:deviceId/next-command", async (req, res) => {
   try {
-    const { deviceId } = req.params;
+    const deviceId = normalizeMac(req.params.deviceId);
+    if (!deviceId) return res.status(400).json({ ok: false, message: "Invalid deviceId" });
+
     const device = await LightDevice.findOne({ deviceId, isDeleted: { $ne: true } });
     if (!device) return res.status(404).json({ ok: false, message: "Device not found" });
 
+    // Lấy command pending đầu tiên, đánh dấu sent
     const cmd = await Command.findOneAndUpdate(
       { deviceId, status: "pending" },
       { $set: { status: "sent" } },
       { sort: { _id: 1 }, new: true }
-    ).select("deviceId command params status");
+    ).select("_id deviceId command params status createdAt");
 
-    const response = { ok: true, command: cmd || null };
-    res.json(response);
-    console.log(`[NEXT COMMAND] Response for ${deviceId}: ${JSON.stringify(response)}`);
+    // TRẢ về command (nếu có) — KHÔNG gửi location/gps
+    return res.json({ ok: true, command: cmd || null });
   } catch (err) {
-    console.error("[NEXT COMMAND] error:", err.message);
-    res.status(500).json({ ok: false, message: "Server error" });
+    console.error("[NEXT COMMAND] error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
 /**
  * ==============================
- * ESP báo cáo trạng thái
- * ==============================
+ * 8) ESP báo cáo trạng thái
+ *    POST /api/devices/report
+ *    Body: { mac, cmd, commandId?, brightness? }
+ *    -> Cập nhật LightStatus, và nếu có commandId thì set command status = done
  */
 router.post("/report", async (req, res) => {
   try {
     const { mac, cmd, commandId, brightness } = req.body;
-    const deviceId = mac.toUpperCase();
+    const deviceId = normalizeMac(mac);
+    if (!deviceId) return res.status(400).json({ ok: false, message: "Invalid MAC" });
 
     await LightStatus.findOneAndUpdate(
       { deviceId },
-      { $set: { relay: cmd === 1, brightness: brightness ?? 50, lastUpdated: new Date() } },
+      { $set: { relay: cmd === 1 || cmd === "1" || cmd === true, brightness: brightness ?? 50, lastUpdated: new Date() } },
       { upsert: true }
     );
 
-    if (commandId)
-      await Command.findOneAndUpdate({ _id: commandId }, { $set: { status: "done" } });
+    if (commandId) {
+      try {
+        await Command.findOneAndUpdate({ _id: commandId }, { $set: { status: "done" } });
+      } catch (e) {
+        // nếu không tìm thấy commandId vẫn tiếp tục
+        console.warn("[REPORT] commandId update failed:", e.message);
+      }
+    }
 
-    res.json({ ok: true });
-    console.log(`[REPORT] Processed report for ${deviceId}, cmd=${cmd}, brightness=${brightness}`);
+    console.log(`[REPORT] Processed report for ${deviceId}, cmd=${cmd}, brightness=${brightness}, commandId=${commandId}`);
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("[REPORT] error:", err.message);
-    res.status(500).json({ ok: false, message: "Lỗi khi xử lý báo cáo" });
+    console.error("[REPORT] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi xử lý báo cáo" });
   }
 });
 
