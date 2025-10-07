@@ -303,6 +303,7 @@ router.post("/report", async (req, res) => {
   }
 });
 
+// bảng đồ cho tất cả đèn (có gps)
 router.get("/geography", async (req, res) => {
   try {
     const devices = await LightDevice.find({ isDeleted: { $ne: true } })
@@ -324,4 +325,40 @@ router.get("/geography", async (req, res) => {
     return res.status(500).json({ ok: false, message: "Lỗi khi lấy dữ liệu địa lý" });
   }
 });
+
+
+// Update GPS
+
+router.post("/update", authenticate, async (req, res) => {
+  try {
+    const { deviceId, gps } = req.body;
+    const normalizedDeviceId = normalizeMac(deviceId);
+    if (!normalizedDeviceId || !gps || !gps.lat || !gps.lon) {
+      return res.status(400).json({ ok: false, message: "Thiếu deviceId hoặc tọa độ GPS" });
+    }
+
+    const latNum = parseFloat(gps.lat);
+    const lonNum = parseFloat(gps.lon);
+    if (Number.isNaN(latNum) || Number.isNaN(lonNum) || latNum < -90 || latNum > 90 || lonNum < -180 || lonNum > 180) {
+      return res.status(400).json({ ok: false, message: "Tọa độ GPS không hợp lệ" });
+    }
+
+    const device = await LightDevice.findOneAndUpdate(
+      { deviceId: normalizedDeviceId, user: req.user.userId, isDeleted: { $ne: true } },
+      { $set: { "gps.lat": latNum, "gps.lon": lonNum } },
+      { new: true }
+    );
+
+    if (!device) {
+      return res.status(404).json({ ok: false, message: "Không tìm thấy thiết bị" });
+    }
+
+    console.log(`[UPDATE GPS] Updated device ${normalizedDeviceId} with gps: ${JSON.stringify(gps)}`);
+    return res.json({ ok: true, device });
+  } catch (err) {
+    console.error("[UPDATE GPS] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi cập nhật GPS" });
+  }
+});
+
 module.exports = router;
