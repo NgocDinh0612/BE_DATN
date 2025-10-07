@@ -303,4 +303,25 @@ router.post("/report", async (req, res) => {
   }
 });
 
+router.get("/geography", async (req, res) => {
+  try {
+    const devices = await LightDevice.find({ isDeleted: { $ne: true } })
+      .select("deviceId name gps location");
+
+    return res.json({
+      ok: true,
+      count: devices.length,
+      geography: devices.map(d => ({
+        id: d.deviceId,
+        name: d.name,
+        lat: d.gps?.lat ?? null,
+        lon: d.gps?.lon ?? null,
+        location: d.location ?? ""
+      }))
+    });
+  } catch (err) {
+    console.error("[GEOGRAPHY] error:", err);
+    return res.status(500).json({ ok: false, message: "Lỗi khi lấy dữ liệu địa lý" });
+  }
+});
 module.exports = router;
